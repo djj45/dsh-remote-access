@@ -59,7 +59,25 @@ curl -s -u 'dsh:密码' -H 'content-type: application/json' \
    - `start proxy success`
 4. 两台电脑不要用同一个 remotePort；Windows 是 18080，Mac 是 18081。
 
-## 3. frpc 连不上 7000 / 一直重试
+## 3. 手机访问返回 400 No required SSL certificate
+
+含义：Nginx 已开启 mTLS 客户端证书校验，但浏览器没有出示有效客户端证书。
+
+排查：
+
+1. 手机是否已按「VPN 和应用用户证书」安装 `.p12`；
+2. 是否使用 Chrome/Edge 访问（Firefox 使用独立证书库，不兼容安卓用户证书）；
+3. 证书是否由当前 Nginx `ssl_client_certificate` 指向的 CA 签发；
+4. 在服务器本机自测（有证书应返回 401 Basic Auth，而不是 400）：
+
+   ```bash
+   sudo curl -sk --resolve dsh-mac.djj45.cn:443:127.0.0.1 \
+     --cert /etc/nginx/client-certs/dsh-android.crt \
+     --key /etc/nginx/client-certs/dsh-android.key \
+     -o /dev/null -w '%{http_code}\n' https://dsh-mac.djj45.cn/
+   ```
+
+## 4. frpc 连不上 7000 / 一直重试
 
 1. 腾讯云安全组入站规则是否放行 `TCP 7000`。
 2. 服务器本机防火墙是否拦截（本项目服务器 ufw 未启用）：
@@ -77,7 +95,7 @@ curl -s -u 'dsh:密码' -H 'content-type: application/json' \
 4. 检查 token 是否与 `frps.toml` 一致。
 5. 检查 frpc 是否写了 `transport.tls.enable = true`（服务端强制 TLS）。
 
-## 4. Windows 双击 DSH-Tunnel-Win.cmd “没有输出”
+## 5. Windows 双击 DSH-Tunnel-Win.cmd “没有输出”
 
 这是正常现象：脚本用 `start /min` 启动 frpc，窗口最小化。
 查看日志：
@@ -88,7 +106,7 @@ Get-Content C:\frp\frpc.log -Tail 30
 
 脚本已做防重复启动，重复双击不会开出多个实例。
 
-## 5. SSH 密钥文件权限过宽
+## 6. SSH 密钥文件权限过宽
 
 Windows OpenSSH 会拒绝权限过宽的 `.pem`：
 
@@ -103,7 +121,7 @@ icacls D:\djj46.pem /inheritance:r
 icacls D:\djj46.pem /grant "你的用户名:R"
 ```
 
-## 6. frps 服务起不来 / 配置错误
+## 7. frps 服务起不来 / 配置错误
 
 查看日志：
 
@@ -118,16 +136,20 @@ journalctl -u frps -n 50 --no-pager
 /usr/local/frp/frpc verify -c /path/to/frpc.toml
 ```
 
-## 7. 回滚
+## 8. 回滚
 
 ```bash
 sudo rm /etc/nginx/sites-enabled/dsh.djj45.cn /etc/nginx/sites-enabled/dsh-mac.djj45.cn
+sudo rm -rf /etc/nginx/client-certs
 sudo nginx -t && sudo systemctl reload nginx
 sudo systemctl disable --now frps
 ```
 
 服务器原有配置备份（本次部署时创建）：
 `/home/ubuntu/backups-dsh/nginx-etc-backup-*.tar.gz`
+
+mTLS 改造前配置备份：
+`/home/ubuntu/backups-dsh/nginx-mtls-*`
 
 DSH patch 备份（本次修复时创建）：
 `C:\Users\<用户>\.dsh\profiles\web\cordis.patch.yml.bak-*`

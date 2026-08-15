@@ -65,7 +65,7 @@ http://127.0.0.1:3080  ← DSH Web 服务
 | 证书 | `*.djj45.cn` 通配符证书，certbot + dns-aliyun，已有续期任务 |
 | frp | v0.71.0，frps `7000`，隧道 `18080/18081`（仅绑 `127.0.0.1`） |
 | DSH | `http://127.0.0.1:3080`，由 `dsh web` 启动 |
-| 访问认证 | Nginx Basic Auth（DSH 本身无登录） |
+| 访问认证 | 手机 mTLS 客户端证书 + Nginx Basic Auth（DSH 本身无登录） |
 | DSH API 信任 | `~/.dsh/profiles/web/cordis.patch.yml` 中配置 `trustedHosts` |
 
 ## 快速部署
@@ -100,6 +100,76 @@ http://127.0.0.1:3080  ← DSH Web 服务
 7. 关键一步：让 DSH 信任公网域名。把 `dsh-trust/cordis.patch.yml` 中的条目追加到
    `C:\Users\<用户>\.dsh\profiles\web\cordis.patch.yml`（Mac 同理为 `~/.dsh/profiles/web/cordis.patch.yml`）。
    DSH 支持该文件热加载，通常无需重启；也可重启 `dsh web` 生效。
+
+8. （强烈建议）只允许你的手机访问：签发 mTLS 客户端证书，见下方「手机专属访问」。
+
+## 手机专属访问（mTLS 客户端证书）
+
+浏览器不会向服务器暴露手机硬件 ID（IMEI/序列号等），可靠的“硬件绑定”方式是
+客户端证书：证书私钥只装在手机里，Nginx 在 TLS 握手阶段强制校验。
+未安装证书的设备直接收到 `400 No required SSL certificate`，连 Basic Auth
+登录框都看不到；安装证书后仍需通过 Basic Auth，形成设备 + 密码双重验证。
+
+### 服务器签发（一次性）
+
+```bash
+sudo mkdir -p /etc/nginx/client-certs && sudo chmod 755 /etc/nginx/client-certs
+
+# 1) 私有 CA（私钥永不离开服务器）
+sudo openssl genrsa -out /etc/nginx/client-certs/dsh-client-ca.key 4096
+sudo openssl req -x509 -new -nodes -key /etc/nginx/client-certs/dsh-client-ca.key \
+  -sha256 -days 3650 -subj "/CN=DSH Remote Access Client CA" \
+  -out /etc/nginx/client-certs/dsh-client-ca.crt
+
+# 2) 手机客户端证书（把 djj45-android 换成你的设备名）
+sudo openssl genrsa -out /etc/nginx/client-certs/dsh-android.key 2048
+sudo openssl req -new -key /etc/nginx/client-certs/dsh-android.key \
+  -subj "/CN=djj45-android" -out /etc/nginx/client-certs/dsh-android.csr
+printf '%s\n' \
+  'basicConstraints = critical, CA:FALSE' \
+  'keyUsage = critical, digitalSignature, keyEncipherment' \
+  'extendedKeyUsage = clientAuth' \
+  'subjectKeyIdentifier = hash' \
+  'authorityKeyIdentifier = keyid,issuer' \
+  | sudo tee /etc/nginx/client-certs/dsh-android.ext >/dev/null
+sudo openssl x509 -req -in /etc/nginx/client-certs/dsh-android.csr \
+  -CA /etc/nginx/client-certs/dsh-client-ca.crt \
+  -CAkey /etc/nginx/client-certs/dsh-client-ca.key -CAcreateserial \
+  -out /etc/nginx/client-certs/dsh-android.crt -days 730 -sha256 \
+  -extfile /etc/nginx/client-certs/dsh-android.ext
+
+# 3) 导出给手机的 .p12（设置一个导入密码）
+sudo openssl pkcs12 -export \
+  -inkey /etc/nginx/client-certs/dsh-android.key \
+  -in /etc/nginx/client-certs/dsh-android.crt \
+  -certfile /etc/nginx/client-certs/dsh-client-ca.crt \
+  -name "DSH Android" -out /etc/nginx/client-certs/dsh-android.p12
+
+# 4) 收紧权限（nginx worker 只需读 CA 证书）
+sudo chmod 644 /etc/nginx/client-certs/dsh-client-ca.crt /etc/nginx/client-certs/dsh-android.crt
+sudo chmod 600 /etc/nginx/client-certs/dsh-client-ca.key /etc/nginx/client-certs/dsh-android.key /etc/nginx/client-certs/dsh-android.p12
+```
+
+Nginx 站点已在 443 块启用（与仓库中两个 conf 一致）：
+
+```nginx
+ssl_verify_client on;
+ssl_client_certificate /etc/nginx/client-certs/dsh-client-ca.crt;
+ssl_verify_depth 1;
+```
+
+### 安卓手机安装
+
+1. 先设置锁屏 PIN/密码；
+2. 把 `.p12` 安全传到手机（传完删除传输副本）；
+3. 设置 → 安全 → 加密与凭据 → 安装证书 → VPN 和应用用户证书 → 选择 `.p12` 并输入导出密码；
+4. 用 Chrome 访问 `https://dsh.djj45.cn` / `https://dsh-mac.djj45.cn`（Firefox 使用独立证书库，不保证兼容）。
+
+### 换机 / 手机丢失
+
+最简单的吊销方式：重新生成一个新的 CA 和客户端证书，并把
+`ssl_client_certificate` 指向新 CA，`sudo nginx -t && sudo systemctl reload nginx`。
+旧手机证书随即全部失效。
 
 ## 验证
 

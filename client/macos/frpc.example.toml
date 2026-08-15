@@ -1,0 +1,22 @@
+# frpc configuration template for the macOS DSH host (frp v0.52+ TOML).
+# Do NOT commit a filled-in version; the real token lives only on the host.
+
+serverAddr = "YOUR_CVM_PUBLIC_IP"
+serverPort = 7000
+
+auth.method = "token"
+auth.token = "REPLACE_WITH_SAME_TOKEN_AS_FRPS"
+
+# Server frps forces TLS, so the client must enable it.
+transport.tls.enable = true
+
+log.to = "/tmp/frpc-mac.log"
+log.level = "info"
+log.maxDays = 7
+
+[[proxies]]
+name = "dsh-mac"
+type = "tcp"
+localIP = "127.0.0.1"
+localPort = 3080
+remotePort = 18081

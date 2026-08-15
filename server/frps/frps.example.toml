@@ -1,0 +1,18 @@
+# frps server configuration template (frp v0.52+ TOML format).
+# Do NOT commit a filled-in version of this file; keep the token in a secret store.
+
+bindAddr = "0.0.0.0"
+bindPort = 7000
+
+# Remote proxy ports bind to CVM loopback only: the public Internet can only
+# reach them through the local Nginx reverse proxy.
+proxyBindAddr = "127.0.0.1"
+
+auth.method = "token"
+auth.token = "REPLACE_WITH_openssl_rand_hex_32"
+
+# Force frpc to use TLS for the control channel.
+transport.tls.force = true
+
+# Only the two DSH tunnel ports may be registered.
+allowPorts = [{ start = 18080, end = 18081 }]

@@ -1,0 +1,15 @@
+# Append this entry to the DSH Web profile patch file.
+#
+# Windows: C:\Users\<user>\.dsh\profiles\web\cordis.patch.yml
+# macOS:   ~/.dsh/profiles/web/cordis.patch.yml
+#
+# DSH hot-reloads this file; no DSH restart is normally required.
+# Replace the domains with your real public hostnames.
+#
+# Why: DSH's /api browser-trust fence only trusts loopback authorities by
+# default. Without this entry, remote pages load but every workspace/session
+# API call returns 403 and the workspace list stays empty.
+
+- id: connection
+  config:
+    trustedHosts: ['dsh.example.com', 'dsh-mac.example.com']

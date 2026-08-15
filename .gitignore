@@ -1,0 +1,10 @@
+# Secrets and local artifacts
+*.pem
+*.key
+*.p12
+frps.toml
+frpc.toml
+.htpasswd*
+secrets.env
+*.log
+*.bak-*

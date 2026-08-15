@@ -1,0 +1,13 @@
+[Unit]
+Description=frps
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/frp/frps -c /usr/local/frp/frps.toml
+Restart=always
+RestartSec=5
+LimitNOFILE=65535
+
+[Install]
+WantedBy=multi-user.target

@@ -66,6 +66,8 @@ upgrade 做 Host/Origin 校验，默认只信任 loopback 权威：
 ## 认证与安全
 
 - DSH Web 本身不提供认证，因此外层必须加 **Nginx Basic Auth**。
+- 只允许指定手机访问时，再叠加 **mTLS 客户端证书**：Nginx 在 TLS 握手阶段
+  校验 `ssl_verify_client on`，未装证书的设备直接收到 400，连登录框都看不到。
 - Basic Auth 只在 HTTPS 上生效（HTTP 会 301 跳转）。
 - frps 使用 `auth.token` 与 `transport.tls.force = true`，防止未授权 frpc 注册隧道。
 - 建议把 Basic Auth 密码设为 16 位以上随机串；公网 7000 来源为 `0.0.0.0/0` 是可接受的，

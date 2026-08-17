@@ -46,7 +46,9 @@ http://127.0.0.1:3080  ← DSH Web 服务
 │   ├── windows/
 │   │   ├── frpc.example.toml      # Windows frpc 配置模板
 │   │   ├── install-frpc.ps1       # Windows 一键安装脚本
-│   │   └── DSH-Tunnel-Win.cmd     # 登录自启脚本（已部署）
+│   │   ├── DSH-Tunnel-Win.vbs     # 隐藏窗口启动器（放入启动文件夹，登录自启）
+│   │   ├── DSH-Tunnel-Win.cmd     # 手动启动（无窗口）
+│   │   └── Stop-DSH-Tunnel-Win.cmd# 手动停止
 │   └── macos/
 │       ├── frpc.example.toml      # Mac frpc 配置模板
 │       ├── install-frpc.sh        # Mac 一键安装脚本
@@ -121,7 +123,7 @@ curl -s -u 'dsh:你的密码' -H 'content-type: application/json' \
 - 手机能打开页面但看不到历史工作区 → DSH `/api` 信任栅栏未放行域名，见 `docs/troubleshooting.md`。
 - 认证后返回 502 → 对应机器的 frpc 未上线或远程端口冲突。
 - `frpc` 连不上 7000 → 检查腾讯云安全组入站规则。
-- Windows 双击启动脚本没反应 → frpc 以最小化窗口运行，日志在 `C:\frp\frpc.log`。
+- Windows 双击启动脚本“没反应”→ 这是正常现象，frpc 通过 VBS 以完全无窗口方式运行，日志在 `C:\frp\frpc.log`。
 
 ## 回滚
 

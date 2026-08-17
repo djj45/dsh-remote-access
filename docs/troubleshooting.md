@@ -79,14 +79,18 @@ curl -s -u 'dsh:密码' -H 'content-type: application/json' \
 
 ## 4. Windows 双击 DSH-Tunnel-Win.cmd “没有输出”
 
-这是正常现象：脚本用 `start /min` 启动 frpc，窗口最小化。
-查看日志：
+这是正常现象：脚本通过 `DSH-Tunnel-Win.vbs` 以 **window style 0** 启动 frpc，
+完全无窗口。查看日志：
 
 ```powershell
 Get-Content C:\frp\frpc.log -Tail 30
 ```
 
-脚本已做防重复启动，重复双击不会开出多个实例。
+- 手动启动：`C:\frp\DSH-Tunnel-Win.cmd`（无窗口）
+- 手动停止：`C:\frp\Stop-DSH-Tunnel-Win.cmd`
+- 登录自启：启动文件夹中的 `DSH-Tunnel-Win.vbs`
+
+VBS 与脚本均做了防重复启动检查，重复运行不会开出多个实例。
 
 ## 5. SSH 密钥文件权限过宽
 

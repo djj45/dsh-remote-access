@@ -61,18 +61,37 @@ remotePort = $RemotePort
 $config = $config -replace "`r", ''
 Set-Content -LiteralPath (Join-Path $InstallDir 'frpc.toml') -Value $config -Encoding ascii -NoNewline
 
-Write-Host "==> Installing logon startup script"
-$cmd = @'
+Write-Host "==> Installing hidden logon startup script"
+$cmdTemplate = @'
 @echo off
-tasklist /FI "IMAGENAME eq frpc.exe" 2>NUL | find /I "frpc.exe" >NUL
-if %ERRORLEVEL%==0 exit /b
-start "DSH-Tunnel" /min C:\frp\frpc.exe -c C:\frp\frpc.toml
+rem Manual start for the DSH frpc tunnel. No console window is shown.
+wscript.exe "__INSTALL_DIR__\DSH-Tunnel-Win.vbs"
 '@
-$cmd = $cmd -replace "`r", ''
+$cmd = $cmdTemplate.Replace('__INSTALL_DIR__', $InstallDir)
 $cmdPath = Join-Path $InstallDir 'DSH-Tunnel-Win.cmd'
 Set-Content -LiteralPath $cmdPath -Value $cmd -Encoding ascii -NoNewline
+
+$vbsTemplate = @'
+Option Explicit
+' Hidden launcher for the DSH frpc tunnel.
+' Launches frpc with window style 0 (no console window at all).
+' Idempotent: does nothing if an frpc.exe process is already running.
+
+Dim wmi, procs, shell
+Set wmi = GetObject("winmgmts:\\.\root\cimv2")
+Set procs = wmi.ExecQuery("SELECT ProcessId FROM Win32_Process WHERE Name = 'frpc.exe'")
+If procs.Count = 0 Then
+    Set shell = CreateObject("WScript.Shell")
+    shell.Run """__INSTALL_DIR__\frpc.exe"" -c ""__INSTALL_DIR__\frpc.toml""", 0, False
+End If
+'@
+$vbs = $vbsTemplate.Replace('__INSTALL_DIR__', $InstallDir)
+$vbsPath = Join-Path $InstallDir 'DSH-Tunnel-Win.vbs'
+Set-Content -LiteralPath $vbsPath -Value $vbs -Encoding ascii -NoNewline
+
 $startupDir = Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs\Startup'
-Copy-Item -LiteralPath $cmdPath -Destination $startupDir -Force
+Copy-Item -LiteralPath $vbsPath -Destination $startupDir -Force
+Remove-Item -LiteralPath (Join-Path $startupDir 'DSH-Tunnel-Win.cmd') -Force -ErrorAction SilentlyContinue
 
 Write-Host "==> Trying elevated SYSTEM auto-start task (optional)"
 try {
@@ -84,12 +103,12 @@ try {
 
 $running = Get-Process frpc -ErrorAction SilentlyContinue
 if ($StartNow -or -not $running) {
-    Write-Host "==> Starting frpc now"
+    Write-Host "==> Starting frpc now (hidden)"
     try {
-        Start-Process -FilePath $frpcExe -ArgumentList '-c', (Join-Path $InstallDir 'frpc.toml') -WindowStyle Minimized
+        wscript.exe $vbsPath
     } catch {
         Write-Host "    Could not start frpc from this shell: $($_.Exception.Message)"
-        Write-Host "    Double-click $cmdPath or log off/on to start it."
+        Write-Host "    Double-click $vbsPath or log off/on to start it."
     }
 }
 
@@ -97,4 +116,5 @@ Write-Host ""
 Write-Host "==> Done."
 Write-Host "    config : $(Join-Path $InstallDir 'frpc.toml')"
 Write-Host "    log    : C:\frp\frpc.log"
+Write-Host "    manual start: $vbsPath"
 Write-Host "    Check log for 'login to server success' and 'start proxy success'."

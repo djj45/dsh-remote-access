@@ -1,0 +1,252 @@
+From 1dd80a437d5812f18f487d94118ff30c0d762d22 Mon Sep 17 00:00:00 2001
+From: =?UTF-8?q?=E7=89=A2=E9=94=8B?= <djj45@MacBook-Air>
+Date: Mon, 17 Aug 2026 22:15:32 +0800
+Subject: [PATCH] feat(connection): compress API responses with gzip/brotli
+
+Compress compressible /api responses in the HTTP bridge using the
+client's Accept-Encoding preference. Gzip wins ties; brotli uses q4 so
+megabyte transcripts stay CPU-bounded. SSE streams and sub-1KB responses
+are left raw, and Content-Length is dropped alongside Content-Encoding.
+---
+ packages/client/connection/src/http-bridge.ts |  91 ++++++++++++++-
+ .../connection/tests/http-bridge.host.spec.ts | 104 +++++++++++++++++-
+ 2 files changed, 192 insertions(+), 3 deletions(-)
+
+diff --git a/packages/client/connection/src/http-bridge.ts b/packages/client/connection/src/http-bridge.ts
+index c26d83b6b7..d95efc5c28 100644
+--- a/packages/client/connection/src/http-bridge.ts
++++ b/packages/client/connection/src/http-bridge.ts
+@@ -4,6 +4,9 @@
+  */
+ 
+ import type { IncomingMessage, ServerResponse } from 'node:http'
++import { Readable } from 'node:stream'
++import { pipeline } from 'node:stream/promises'
++import { constants as zlibConstants, createBrotliCompress, createGzip } from 'node:zlib'
+ 
+ /** Default carrier cap for all HTTP RPC bodies: sized for the default
+  * aggregate image limit (100 MiB) after base64 expansion plus envelope
+@@ -11,6 +14,70 @@ import type { IncomingMessage, ServerResponse } from 'node:http'
+  * each body in memory, so this cap is also the per-request resident bound. */
+ export const DEFAULT_MAX_REQUEST_BODY_BYTES = 160 * 1024 * 1024
+ 
++/** Content types the API bridge compresses; streaming event channels stay raw. */
++const COMPRESSIBLE_CONTENT_TYPES = new Set([
++  'application/json',
++  'application/javascript',
++  'application/xml',
++  'image/svg+xml',
++  'text/css',
++  'text/html',
++  'text/javascript',
++  'text/plain',
++  'text/xml',
++])
++
++/** Small responses are cheaper to send raw than to gzip and announce. */
++const MIN_COMPRESS_BYTES = 1024
++
++/**
++ * Choose the response content coding the bridge may apply. Gzip wins ties:
++ * it is universal, fast on the host, and within a few percent of Brotli for
++ * the JSON transcripts this carrier mostly ships.
++ * @param acceptEncoding - request `accept-encoding` value (or values).
++ * @param contentType - response `content-type` value.
++ * @param contentLength - response `content-length` value, when declared.
++ * @returns the negotiated content coding, or undefined when none applies.
++ */
++export function selectContentEncoding(
++  acceptEncoding: string | string[] | undefined,
++  contentType: string | null | undefined,
++  contentLength: string | null | undefined,
++): 'gzip' | 'br' | undefined {
++  if (acceptEncoding === undefined) return undefined
++  const type = (contentType ?? '').split(';', 1)[0]?.trim().toLowerCase() ?? ''
++  if (!COMPRESSIBLE_CONTENT_TYPES.has(type)) return undefined
++  if (contentLength !== undefined && contentLength !== null) {
++    const length = Number(contentLength)
++    if (Number.isFinite(length) && length < MIN_COMPRESS_BYTES) return undefined
++  }
++  let gzip = 0
++  let br = 0
++  let any = 0
++  for (const raw of [acceptEncoding].flat()) {
++    for (const entry of raw.split(',')) {
++      const [rawName = '', ...params] = entry.trim().split(';').map(part => part.trim())
++      const name = rawName.toLowerCase()
++      let q = 1
++      for (const param of params) {
++        const [rawKey = '', rawValue = ''] = param.split('=')
++        if (rawKey.trim().toLowerCase() === 'q') {
++          const parsed = Number(rawValue.trim())
++          if (Number.isFinite(parsed)) q = parsed
++        }
++      }
++      if (q <= 0) continue
++      if (name === 'gzip') gzip = Math.max(gzip, q)
++      else if (name === 'br') br = Math.max(br, q)
++      else if (name === '*') any = Math.max(any, q)
++    }
++  }
++  gzip = Math.max(gzip, any)
++  br = Math.max(br, any)
++  if (gzip <= 0 && br <= 0) return undefined
++  return gzip >= br ? 'gzip' : 'br'
++}
++
+ /** Transport-independent request handler consumed by the Host HTTP bridge. */
+ export interface FetchHandler {
+   /**
+@@ -73,7 +140,29 @@ export async function bridge(
+     signal: abort.signal,
+   })
+   const response = await apiHandler.fetch(request)
+-  res.writeHead(response.status, Object.fromEntries(response.headers.entries()))
++  const headers = Object.fromEntries(response.headers.entries())
++  const contentEncoding = headers['content-encoding'] === undefined
++    ? selectContentEncoding(req.headers['accept-encoding'], headers['content-type'], headers['content-length'])
++    : undefined
++  if (response.body !== null && contentEncoding !== undefined) {
++    delete headers['content-length']
++    headers['content-encoding'] = contentEncoding
++    headers.vary = headers.vary === undefined || headers.vary.trim() === ''
++      ? 'Accept-Encoding'
++      : `${headers.vary}, Accept-Encoding`
++    res.writeHead(response.status, headers)
++    // Undici's `ReadableStream<Uint8Array>` and Node's stream/web generic
++    // disagree on the ArrayBufferLike variance; the body is the same stream.
++    const source = Readable.fromWeb(response.body as unknown as Parameters<typeof Readable.fromWeb>[0])
++    // Brotli's default quality (11) costs seconds on megabyte payloads; q4
++    // still beats gzip on size while keeping host CPU comparable to it.
++    const compressor = contentEncoding === 'gzip'
++      ? createGzip()
++      : createBrotliCompress({ params: { [zlibConstants.BROTLI_PARAM_QUALITY]: 4 } })
++    await pipeline(source, compressor, res)
++    return
++  }
++  res.writeHead(response.status, headers)
+   if (response.body === null) {
+     res.end()
+     return
+diff --git a/packages/client/connection/tests/http-bridge.host.spec.ts b/packages/client/connection/tests/http-bridge.host.spec.ts
+index 1b45ecc014..df033b8daa 100644
+--- a/packages/client/connection/tests/http-bridge.host.spec.ts
++++ b/packages/client/connection/tests/http-bridge.host.spec.ts
+@@ -1,8 +1,11 @@
+ import { EventEmitter } from 'node:events'
++import { createServer, request as httpRequest } from 'node:http'
++import type { AddressInfo } from 'node:net'
+ import { Readable } from 'node:stream'
++import { brotliDecompressSync, gunzipSync } from 'node:zlib'
+ import type { IncomingMessage, ServerResponse } from 'node:http'
+-import { describe, expect, it } from 'vitest'
+-import { bridge } from '../src/http-bridge.ts'
++import { afterEach, describe, expect, it } from 'vitest'
++import { bridge, selectContentEncoding } from '../src/http-bridge.ts'
+ 
+ describe('HTTP bridge abort', () => {
+   it('destroys a declared-oversize request instead of draining it', async () => {
+@@ -73,3 +76,100 @@ describe('HTTP bridge abort', () => {
+     expect(carrierSignal?.aborted).toBe(true)
+   })
+ })
++
++describe('HTTP bridge content encoding', () => {
++  const servers: ReturnType<typeof createServer>[] = []
++  afterEach(async () => {
++    await Promise.all(servers.splice(0).map(server => new Promise<void>((resolve, reject) => {
++      server.close((error) => {
++        if (error === undefined) resolve()
++        else reject(error)
++      })
++    })))
++  })
++
++  async function start(handler: (req: IncomingMessage, res: ServerResponse) => Promise<void>): Promise<number> {
++    const server = createServer((req, res) => {
++      handler(req, res).catch((error: unknown) => {
++        res.destroy(error instanceof Error ? error : new Error(String(error)))
++      })
++    })
++    servers.push(server)
++    await new Promise<void>((resolve, reject) => {
++      server.once('error', reject)
++      server.listen(0, '127.0.0.1', () => {
++        server.off('error', reject)
++        resolve()
++      })
++    })
++    return (server.address() as AddressInfo).port
++  }
++
++  async function post(port: number, acceptEncoding: string): Promise<{ headers: IncomingMessage['headers']; body: Buffer }> {
++    return new Promise((resolve, reject) => {
++      const req = httpRequest({
++        host: '127.0.0.1',
++        port,
++        path: '/api/session.list',
++        method: 'POST',
++        headers: { 'accept-encoding': acceptEncoding, 'content-type': 'application/json' },
++      }, (res) => {
++        const chunks: Buffer[] = []
++        res.on('data', (chunk: Buffer) => { chunks.push(chunk) })
++        res.on('end', () => { resolve({ headers: res.headers, body: Buffer.concat(chunks) }) })
++      })
++      req.on('error', reject)
++      req.end('{}')
++    })
++  }
++
++  it('gzip-compresses a JSON API response and announces the coding', async () => {
++    const payload = 'x'.repeat(4096)
++    const port = await start(async (req, res) => {
++      await bridge(req, res, { fetch: async () => Response.json({ payload }) })
++    })
++    const { headers, body } = await post(port, 'gzip')
++    expect(headers['content-encoding']).toBe('gzip')
++    expect(headers.vary).toContain('Accept-Encoding')
++    expect(JSON.parse(gunzipSync(body).toString())).toEqual({ payload })
++  })
++
++  it('brotli-compresses when brotli is the only accepted coding', async () => {
++    const payload = 'y'.repeat(4096)
++    const port = await start(async (req, res) => {
++      await bridge(req, res, { fetch: async () => Response.json({ payload }) })
++    })
++    const { headers, body } = await post(port, 'br')
++    expect(headers['content-encoding']).toBe('br')
++    expect(JSON.parse(brotliDecompressSync(body).toString())).toEqual({ payload })
++  })
++
++  it('keeps streaming event channels uncompressed', async () => {
++    const frame = 'data: {"type":"stream/error"}\n\n'
++    const port = await start(async (req, res) => {
++      await bridge(req, res, {
++        fetch: async () => new Response(frame, { headers: { 'content-type': 'text/event-stream' } }),
++      })
++    })
++    const { headers, body } = await post(port, 'gzip')
++    expect(headers['content-encoding']).toBeUndefined()
++    expect(body.toString()).toBe(frame)
++  })
++})
++
++describe('selectContentEncoding', () => {
++  it('negotiates q-values and prefers gzip on ties', () => {
++    expect(selectContentEncoding('gzip, br', 'application/json', undefined)).toBe('gzip')
++    expect(selectContentEncoding('gzip;q=0, br;q=0.5', 'application/json', undefined)).toBe('br')
++    expect(selectContentEncoding('*', 'application/json; charset=utf-8', undefined)).toBe('gzip')
++    expect(selectContentEncoding('br', 'application/json', undefined)).toBe('br')
++  })
++
++  it('skips unsupported, disabled, streaming, and small responses', () => {
++    expect(selectContentEncoding(undefined, 'application/json', undefined)).toBeUndefined()
++    expect(selectContentEncoding('gzip;q=0', 'application/json', undefined)).toBeUndefined()
++    expect(selectContentEncoding('gzip', 'text/event-stream', undefined)).toBeUndefined()
++    expect(selectContentEncoding('gzip', 'application/json', '512')).toBeUndefined()
++    expect(selectContentEncoding('gzip', 'application/octet-stream', undefined)).toBeUndefined()
++  })
++})
+-- 
+2.54.0
+
